@@ -22,6 +22,7 @@ interface IJMIExtensionLegacy {
 
 contract UpgradeUSDatBase {
     address constant USDAT_PROXY = 0x23238f20b894f29041f48D88eE91131C395Aaa71;
+
     address constant M_TOKEN = 0x866A2BF4E572CbcF37D5071A7a58503Bfb36be1b;
     address constant PYUSDX = 0xeBDB0942cE16386Ab90718C7BD10C91CDb66b14d;
     address constant PYUSDX_SWAP_FACILITY = 0x0bC305e7e13113cAEd3f5486849e9518a1cC4173;
@@ -49,10 +50,9 @@ contract UpgradeUSDatBase {
         impl = Upgrades.prepareUpgrade("USDat.sol", opts);
     }
 
-    /// @dev Build the call the timelock makes on execute: ProxyAdmin.upgradeAndCall(proxy, impl, migrate(M_TOKEN)).
+    /// @dev Build the call the timelock makes on execute: ProxyAdmin.upgradeAndCall(proxy, impl, migrate()).
     function _buildUpgradeAndCallData(address impl) internal view returns (address proxyAdmin, bytes memory payload) {
         proxyAdmin = Upgrades.getAdminAddress(USDAT_PROXY);
-        payload =
-            abi.encodeCall(IProxyAdmin.upgradeAndCall, (USDAT_PROXY, impl, abi.encodeCall(USDat.migrate, (M_TOKEN))));
+        payload = abi.encodeCall(IProxyAdmin.upgradeAndCall, (USDAT_PROXY, impl, abi.encodeCall(USDat.migrate, ())));
     }
 }
