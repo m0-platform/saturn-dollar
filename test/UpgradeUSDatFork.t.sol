@@ -94,7 +94,8 @@ contract UpgradeUSDatForkTest is Test, UpgradeUSDatBase {
     /* ============ Full timelock upgrade + migrate flow ============ */
 
     function test_upgradeAndMigrate_timelock() external {
-        // The proxy earns M yield pre-upgrade; migrate must stop it.
+        // The proxy earns M yield pre-upgrade; migrate must leave that on so the reserves keep
+        // yielding while they are drained into PYUSDX.
         assertTrue(IMTokenLike(M_TOKEN).isEarning(USDAT_PROXY));
 
         (address proxyAdmin, bytes memory payload) = _schedule();
@@ -129,9 +130,11 @@ contract UpgradeUSDatForkTest is Test, UpgradeUSDatBase {
 
         // Verify post-migration state
 
-        // The new implementation is wired to PYUSDX, not the legacy M swap facility.
+        // The new implementation is wired to PYUSDX, not the legacy M swap facility, and its hardcoded
+        // M constant names the M the proxy actually holds.
         assertEq(usdat.pyusdx(), PYUSDX);
         assertEq(usdat.swapFacility(), PYUSDX_SWAP_FACILITY);
+        assertEq(usdat.M_TOKEN(), M_TOKEN);
 
         // migrate mints the surplus as extension tokens (not M), so the proxy's held M is unchanged; it
         // then registers that held M as a replaceable alt-asset with 6 decimals.
@@ -152,12 +155,51 @@ contract UpgradeUSDatForkTest is Test, UpgradeUSDatBase {
         assertEq(IERC20(PYUSDX).balanceOf(USDAT_PROXY), 0);
         assertFalse(usdat.isAllowedToUnwrap(1));
 
-        // M earning is stopped for the proxy (migrate self opt-out)
-        assertFalse(IMTokenLike(M_TOKEN).isEarning(USDAT_PROXY));
+        // M earning carries through the upgrade untouched — the reserves keep yielding while they are
+        // drained, and that yield is realized via claimMYield.
+        assertTrue(IMTokenLike(M_TOKEN).isEarning(USDAT_PROXY));
 
         // Reinitializer guard: migrate cannot run again
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        usdat.migrate(M_TOKEN);
+        usdat.migrate();
+    }
+
+    /// @dev The point of leaving M earning on: yield accrues on the reserves after the upgrade, invisible
+    ///      to MultiMint's balance snapshot, and `claimMYield` is the only way to realize it.
+    function test_claimMYield_realizesMYieldAccruedAfterUpgrade() external {
+        _doTimelockUpgrade();
+
+        address yieldRecipient = usdat.yieldRecipient();
+        uint256 totalSupplyBefore = usdat.totalSupply();
+        uint256 totalAssetsBefore = usdat.totalAssets();
+        uint256 trackedBefore = usdat.assetBalanceOf(M_TOKEN);
+        uint256 capBefore = usdat.assetCap(M_TOKEN);
+        uint256 yieldRecipientBalanceBefore = usdat.balanceOf(yieldRecipient);
+
+        // Nothing to claim right after migrate: it registered the full held balance.
+        assertEq(usdat.mYield(), 0);
+
+        vm.warp(block.timestamp + 30 days);
+
+        // Earning continued, so the held M outgrew the balance MultiMint tracks.
+        uint256 surplus = IERC20(M_TOKEN).balanceOf(USDAT_PROXY) - trackedBefore;
+        assertGt(surplus, 0);
+        assertEq(usdat.mYield(), surplus);
+
+        // Permissionless: EXECUTOR holds no role on the token.
+        vm.prank(EXECUTOR);
+        assertEq(usdat.claimMYield(), surplus);
+
+        // The surplus went to the yield recipient and was registered as backing.
+        assertEq(usdat.balanceOf(yieldRecipient), yieldRecipientBalanceBefore + surplus);
+        assertEq(usdat.totalSupply(), totalSupplyBefore + surplus);
+        assertEq(usdat.totalAssets(), totalAssetsBefore + surplus);
+        assertEq(usdat.assetBalanceOf(M_TOKEN), IERC20(M_TOKEN).balanceOf(USDAT_PROXY));
+        assertEq(usdat.mYield(), 0);
+
+        // cap untouched, so M wraps stay blocked.
+        assertEq(usdat.assetCap(M_TOKEN), capBefore);
+        assertFalse(usdat.isAllowedToWrap(M_TOKEN, 1));
     }
 
     /// @dev Regression test for the hazard the timelock introduces: five days elapse between `schedule`
