@@ -34,10 +34,14 @@ contract UpgradeUSDatForkTest is Test, UpgradeUSDatBase {
     address constant YIELD_RECIPIENT_MANAGER = 0x09D6E34cE24D54890fF0BC6a090b5f880F8C729f;
     address constant ASSET_CAP_MANAGER = 0x7D343D17896D2cd87A49b4fB8872298A883f78f7;
 
+    // Holds PROPOSER_ROLE and CANCELLER_ROLE on the asset-cap-manager timelock (ASSET_CAP_TIMELOCK).
+    address constant ASSET_CAP_TIMELOCK_PROPOSER = 0xA18f34a03788CfC566Ce5CCB21b2715f072dA3Ad;
+
     // The same proxy, viewed through its pre-upgrade (JMIExtension) and post-upgrade (USDat) interfaces.
     IJMIExtensionLegacy public legacyProxy = IJMIExtensionLegacy(USDAT_PROXY);
     USDat public usdat = USDat(USDAT_PROXY);
     TimelockController public timelock = TimelockController(payable(TIMELOCK));
+    TimelockController public assetCapTimelock = TimelockController(payable(ASSET_CAP_TIMELOCK));
 
     function setUp() public {
         // First block at which the timelock owns the ProxyAdmin.
@@ -265,5 +269,53 @@ contract UpgradeUSDatForkTest is Test, UpgradeUSDatBase {
         // pinVersion/unpinVersion outright (they revert VersionPinningDisabled regardless of role).
         assertFalse(usdat.hasRole(usdat.VERSION_MANAGER_ROLE(), PROPOSER));
         assertFalse(usdat.hasRole(usdat.VERSION_MANAGER_ROLE(), ROLE_MANAGER));
+    }
+
+    /* ============ replaceAsset whitelist ============ */
+
+    address constant NOT_SOLVER = address(0xBAD);
+
+    /// @dev The whitelist op lives on a different timelock than the upgrade, so it is scheduled up front
+    ///      against the still-legacy proxy and both 5-day delays elapse concurrently. After the upgrade lands
+    //       the whitelist is still empty — replaceAsset is open to any caller —
+    //       until the whitelist op executes and gates it to the solver alone.
+    function test_whitelist_scheduledInParallel_gatesReplaceAssetToSolver() external {
+        assertTrue(assetCapTimelock.hasRole(assetCapTimelock.PROPOSER_ROLE(), ASSET_CAP_TIMELOCK_PROPOSER));
+        assertEq(assetCapTimelock.getMinDelay(), 5 days);
+
+        // Schedule BOTH operations now, before the upgrade is live.
+        (address proxyAdmin, bytes memory upgradePayload) = _schedule();
+
+        bytes memory whitelistPayload = _buildWhitelistSolverData();
+        uint256 whitelistDelay = assetCapTimelock.getMinDelay();
+
+        vm.prank(ASSET_CAP_TIMELOCK_PROPOSER);
+        assetCapTimelock.schedule(USDAT_PROXY, 0, whitelistPayload, PREDECESSOR, SALT, whitelistDelay);
+
+        // A single shared 5-day window matures both operations.
+        vm.warp(block.timestamp + 5 days + 1);
+
+        // The upgrade must execute first so the setter selector exists when the whitelist op runs.
+        _execute(proxyAdmin, upgradePayload);
+
+        // Post-upgrade, pre-whitelist: migrate left the whitelist empty, so any caller passes the gate,
+        // and the asset-cap-manager timelock still holds the role that can close it.
+        assertTrue(usdat.hasRole(usdat.ASSET_CAP_MANAGER_ROLE(), ASSET_CAP_TIMELOCK));
+        assertFalse(usdat.isReplaceAssetWhitelistEnabled());
+        assertEq(usdat.getReplaceAssetWhitelist().length, 0);
+        assertTrue(usdat.isAllowedToReplaceAsset(NOT_SOLVER, M_TOKEN, 1));
+
+        vm.prank(EXECUTOR);
+        assetCapTimelock.execute(USDAT_PROXY, 0, whitelistPayload, PREDECESSOR, SALT);
+
+        // Post-whitelist: replaceAsset is gated to the solver alone.
+        assertTrue(usdat.isReplaceAssetWhitelistEnabled());
+
+        address[] memory whitelist = usdat.getReplaceAssetWhitelist();
+        assertEq(whitelist.length, 1);
+        assertEq(whitelist[0], SOLVER);
+
+        assertTrue(usdat.isAllowedToReplaceAsset(SOLVER, M_TOKEN, 1));
+        assertFalse(usdat.isAllowedToReplaceAsset(NOT_SOLVER, M_TOKEN, 1));
     }
 }
