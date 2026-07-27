@@ -10,6 +10,7 @@ import {Upgrades} from "openzeppelin-foundry-upgrades/Upgrades.sol";
 import {USDat} from "../src/USDat.sol";
 import {UpgradeUSDatBase, IJMIExtensionLegacy} from "../script/UpgradeUSDatBase.sol";
 import {IMTokenLike} from "../src/interfaces/IMTokenLike.sol";
+import {IMultiMint} from "@pyusdx/platform/projects/interfaces/IMultiMint.sol";
 
 /// @dev Minimal surface for asserting who controls the ProxyAdmin at the fork block.
 interface IOwnableLike {
@@ -122,6 +123,9 @@ contract UpgradeUSDatForkTest is Test, UpgradeUSDatBase {
 
         // Only USDC is an accepted alt-asset with a balance
         assertEq(usdcBalanceBefore, totalAssetsBefore);
+
+        vm.expectEmit();
+        emit IMultiMint.AssetCapSet(M_TOKEN, mBalanceBefore);
 
         _execute(proxyAdmin, payload);
 
