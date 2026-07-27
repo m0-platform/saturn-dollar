@@ -318,4 +318,35 @@ contract UpgradeUSDatForkTest is Test, UpgradeUSDatBase {
         assertTrue(usdat.isAllowedToReplaceAsset(SOLVER, M_TOKEN, 1));
         assertFalse(usdat.isAllowedToReplaceAsset(NOT_SOLVER, M_TOKEN, 1));
     }
+
+    /* ============ M asset cap finalizer ============ */
+
+    /// @dev End-state finalizer: zeroing M's cap through the asset-cap-manager timelock makes M an
+    ///      unallowed asset, permanently disabling M wraps and replaceAsset. This is the mechanism the
+    ///      migration relies on to shed M once the reserve is drained (the drain itself needs live PYUSDX
+    ///      liquidity, so it is out of scope here — this asserts the cap lever, not a full drain).
+    function test_zeroMAssetCap_disablesMAsset() external {
+        _doTimelockUpgrade();
+
+        // Post-migrate, M is a registered, allowed alt-asset.
+        assertTrue(usdat.isAllowedAsset(M_TOKEN));
+        assertGt(usdat.assetCap(M_TOKEN), 0);
+
+        bytes memory payload = _buildZeroMAssetCapData();
+        uint256 delay = assetCapTimelock.getMinDelay();
+
+        vm.prank(ASSET_CAP_TIMELOCK_PROPOSER);
+        assetCapTimelock.schedule(USDAT_PROXY, 0, payload, PREDECESSOR, SALT, delay);
+
+        vm.warp(block.timestamp + delay + 1);
+
+        vm.prank(EXECUTOR);
+        assetCapTimelock.execute(USDAT_PROXY, 0, payload, PREDECESSOR, SALT);
+
+        // M is now unallowed: cap is zero, and both wrapping and replacing M are disabled.
+        assertEq(usdat.assetCap(M_TOKEN), 0);
+        assertFalse(usdat.isAllowedAsset(M_TOKEN));
+        assertFalse(usdat.isAllowedToWrap(M_TOKEN, 1));
+        assertFalse(usdat.isAllowedToReplaceAsset(SOLVER, M_TOKEN, 1));
+    }
 }
